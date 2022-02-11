@@ -36,7 +36,11 @@ enum
 template<typename AT>
 inline AT DynBaseAddress(AT address)
 {
+#ifdef _WIN64
+	return (ptrdiff_t)GetModuleHandle(nullptr) - 0x140000000 + address;
+#else
 	return (ptrdiff_t)GetModuleHandle(nullptr) - 0x400000 + address;
+#endif
 }
 
 namespace Memory
@@ -49,7 +53,7 @@ namespace Memory
 	template<typename AT>
 	inline void		Patch(AT address, std::initializer_list<uint8_t> list )
 	{
-		uint8_t* const addr = (uint8_t*)address;
+		uint8_t* addr = reinterpret_cast<uint8_t*>(address);
 		std::copy( list.begin(), list.end(), stdext::make_checked_array_iterator(addr, list.size()) );
 	}
 #endif
@@ -67,31 +71,19 @@ namespace Memory
 	template<typename Var, typename AT>
 	inline void		WriteOffsetValue(AT address, Var var)
 	{
-		union member_cast
-		{
-			intptr_t addr;
-			Var varPtr;
-		} cast;
-		static_assert( sizeof(cast.addr) == sizeof(cast.varPtr), "member_cast failure!" );
-		cast.varPtr = var;
-
 		intptr_t dstAddr = (intptr_t)address;
-		*(int32_t*)dstAddr = static_cast<int32_t>(cast.addr - dstAddr - 4);
+		intptr_t srcAddr;
+		memcpy( &srcAddr, std::addressof(var), sizeof(srcAddr) );
+		*(int32_t*)dstAddr = static_cast<int32_t>(srcAddr - dstAddr - 4);
 	}
 
 	template<typename Var, typename AT>
 	inline void		ReadOffsetValue(AT address, Var& var)
 	{
-		union member_cast
-		{
-			intptr_t addr;
-			Var varPtr;
-		} cast;
-		static_assert( sizeof(cast.addr) == sizeof(cast.varPtr), "member_cast failure!" );
-
 		intptr_t srcAddr = (intptr_t)address;
-		cast.addr = srcAddr + 4 + *(int32_t*)srcAddr;
-		var = cast.varPtr;
+		intptr_t dstAddr = srcAddr + 4 + *(int32_t*)srcAddr;
+		var = {};
+		memcpy( std::addressof(var), &dstAddr, sizeof(dstAddr) );
 	}
 
 	template<typename AT, typename Func>
@@ -158,6 +150,18 @@ namespace Memory
 			Memory::Nop(DynBaseAddress(address), count);
 		}
 
+		template<typename Var, typename AT>
+		inline void		WriteOffsetValue(AT address, Var var)
+		{
+			Memory::WriteOffsetValue(DynBaseAddress(address), var);
+		}
+
+		template<typename Var, typename AT>
+		inline void		ReadOffsetValue(AT address, Var& var)
+		{
+			Memory::ReadOffsetValue(DynBaseAddress(address), var);
+		}
+
 		template<typename AT, typename HT>
 		inline void		InjectHook(AT address, HT hook)
 		{
@@ -201,50 +205,66 @@ namespace Memory
 		template<typename T, typename AT>
 		inline void		Patch(AT address, T value)
 		{
-			DWORD		dwProtect[2];
-			VirtualProtect((void*)address, sizeof(T), PAGE_EXECUTE_READWRITE, &dwProtect[0]);
+			DWORD		dwProtect;
+			VirtualProtect((void*)address, sizeof(T), PAGE_EXECUTE_READWRITE, &dwProtect);
 			Memory::Patch( address, value );
-			VirtualProtect((void*)address, sizeof(T), dwProtect[0], &dwProtect[1]);
+			VirtualProtect((void*)address, sizeof(T), dwProtect, &dwProtect);
 		}
 
 #ifndef _MEMORY_NO_CRT
 		template<typename AT>
 		inline void		Patch(AT address, std::initializer_list<uint8_t> list )
 		{
-			DWORD		dwProtect[2];
-			VirtualProtect((void*)address, list.size(), PAGE_EXECUTE_READWRITE, &dwProtect[0]);
+			DWORD		dwProtect;
+			VirtualProtect((void*)address, list.size(), PAGE_EXECUTE_READWRITE, &dwProtect);
 			Memory::Patch(address, std::move(list));
-			VirtualProtect((void*)address, list.size(), dwProtect[0], &dwProtect[1]);
+			VirtualProtect((void*)address, list.size(), dwProtect, &dwProtect);
 		}
 #endif
 
 		template<typename AT>
 		inline void		Nop(AT address, size_t count)
 		{
-			DWORD		dwProtect[2];
-			VirtualProtect((void*)address, count, PAGE_EXECUTE_READWRITE, &dwProtect[0]);
+			DWORD		dwProtect;
+			VirtualProtect((void*)address, count, PAGE_EXECUTE_READWRITE, &dwProtect);
 			Memory::Nop( address, count );
-			VirtualProtect((void*)address, count, dwProtect[0], &dwProtect[1]);
+			VirtualProtect((void*)address, count, dwProtect, &dwProtect);
+		}
+
+		template<typename Var, typename AT>
+		inline void		WriteOffsetValue(AT address, Var var)
+		{
+			DWORD		dwProtect;
+
+			VirtualProtect((void*)address, 4, PAGE_EXECUTE_READWRITE, &dwProtect);
+			Memory::WriteOffsetValue(address, var);
+			VirtualProtect((void*)address, 4, dwProtect, &dwProtect);
+		}
+
+		template<typename Var, typename AT>
+		inline void		ReadOffsetValue(AT address, Var& var)
+		{
+			Memory::ReadOffsetValue(address, var);
 		}
 
 		template<typename AT, typename HT>
 		inline void		InjectHook(AT address, HT hook)
 		{
-			DWORD		dwProtect[2];
+			DWORD		dwProtect;
 
-			VirtualProtect((void*)((DWORD_PTR)address + 1), 4, PAGE_EXECUTE_READWRITE, &dwProtect[0]);
+			VirtualProtect((void*)((DWORD_PTR)address + 1), 4, PAGE_EXECUTE_READWRITE, &dwProtect);
 			Memory::InjectHook( address, hook );
-			VirtualProtect((void*)((DWORD_PTR)address + 1), 4, dwProtect[0], &dwProtect[1]);
+			VirtualProtect((void*)((DWORD_PTR)address + 1), 4, dwProtect, &dwProtect);
 		}
 
 		template<typename AT, typename HT>
 		inline void		InjectHook(AT address, HT hook, unsigned int nType)
 		{
-			DWORD		dwProtect[2];
+			DWORD		dwProtect;
 
-			VirtualProtect((void*)address, 5, PAGE_EXECUTE_READWRITE, &dwProtect[0]);
+			VirtualProtect((void*)address, 5, PAGE_EXECUTE_READWRITE, &dwProtect);
 			Memory::InjectHook( address, hook, nType );
-			VirtualProtect((void*)address, 5, dwProtect[0], &dwProtect[1]);
+			VirtualProtect((void*)address, 5, dwProtect, &dwProtect);
 		}
 
 		template<typename Func, typename AT>
@@ -292,6 +312,18 @@ namespace Memory
 			inline void		Nop(AT address, size_t count)
 			{
 				VP::Nop(DynBaseAddress(address), count);
+			}
+
+			template<typename Var, typename AT>
+			inline void		WriteOffsetValue(AT address, Var var)
+			{
+				VP::WriteOffsetValue(DynBaseAddress(address), var);
+			}
+
+			template<typename Var, typename AT>
+			inline void		ReadOffsetValue(AT address, Var& var)
+			{
+				VP::ReadOffsetValue(DynBaseAddress(address), var);
 			}
 
 			template<typename AT, typename HT>
@@ -390,23 +422,18 @@ namespace ScopedUnprotect
 			PIMAGE_NT_HEADERS		ntHeader = (PIMAGE_NT_HEADERS)((DWORD_PTR)hInstance + ((PIMAGE_DOS_HEADER)hInstance)->e_lfanew);
 			PIMAGE_SECTION_HEADER	pSection = IMAGE_FIRST_SECTION(ntHeader);
 
-			DWORD_PTR VirtualAddress = DWORD_PTR(-1);
-			SIZE_T VirtualSize = SIZE_T(-1);
 			for ( SIZE_T i = 0, j = ntHeader->FileHeader.NumberOfSections; i < j; ++i, ++pSection )
 			{
 				if ( strncmp( (const char*)pSection->Name, name, IMAGE_SIZEOF_SHORT_NAME ) == 0 )
 				{
-					VirtualAddress = (DWORD_PTR)hInstance + pSection->VirtualAddress;
-					VirtualSize = pSection->Misc.VirtualSize;
+					const DWORD_PTR VirtualAddress = (DWORD_PTR)hInstance + pSection->VirtualAddress;
+					const SIZE_T VirtualSize = pSection->Misc.VirtualSize;
+					UnprotectRange( VirtualAddress, VirtualSize );
+
 					m_locatedSection = true;
 					break;
 				}
 			}
-
-			if ( VirtualAddress == DWORD_PTR(-1) )
-				return;
-
-			UnprotectRange( VirtualAddress, VirtualSize );
 		};
 
 		bool	SectionLocated() const { return m_locatedSection; }
